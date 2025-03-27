@@ -170,7 +170,7 @@ spec:
         being re-promoted into (e.g. env-dev-int, env-st-1)
       name: environment-repo-name
       type: string
-    - default: np-bitbucket.apps.np-mgmt.obpr1.eleccninp.corporg.net
+    - default: np-bitbucket.apps.xxxx.xxxx.eleccninp.corporg.net
       description: Base URL of the Bitbucket instance where the repos are hosted
       name: bitbucket-base-url
       type: string
@@ -219,17 +219,41 @@ spec:
 
         git config --global http.sslCAInfo /tekton-custom-certs/ca-bundle.crt
 
-        until /ko-app/git-init
-        -url="https://$(params.bitbucket-base-url)/scm/EFE/$(params.environment-repo-name).git"
-        -revision="master"
-        -path="$(workspaces.output.path)/$(params.re-promotion-environment)"
-        -sslVerify="true" -submodules="true" -depth="1"; do sleep 2; done
+        max_attempts=5
+        attempt=1
 
-        until /ko-app/git-init
-        -url="https://$(params.bitbucket-base-url)/scm/EFE/$(params.environment-repo-name).git"
-        -revision="$(params.re-promote-from-tag)"
-        -path="$(workspaces.output.path)/$re_promote_from" -sslVerify="true"
-        -submodules="true" -depth="1"; do sleep 2; done
+        while [ $attempt -le $max_attempts ]; do
+          /ko-app/git-init \
+          -url="https://$(params.bitbucket-base-url)/scm/EFE/$(params.environment-repo-name).git" \
+          -revision="master" \
+          -path="$(workspaces.output.path)/$(params.re-promotion-environment)" \
+          -sslVerify="true" -submodules="true" -depth="1" && break
+          echo "Attempt $attempt failed. Retrying..."
+          attempt=$((attempt + 1))
+          sleep 2
+        done
+
+        if [ $attempt -gt $max_attempts ]; then
+          echo "Failed to clone master branch after $max_attempts attempts."
+          exit 1
+        fi
+
+        attempt=1
+        while [ $attempt -le $max_attempts ]; do
+          /ko-app/git-init \
+          -url="https://$(params.bitbucket-base-url)/scm/EFE/$(params.environment-repo-name).git" \
+          -revision="$(params.re-promote-from-tag)" \
+          -path="$(workspaces.output.path)/$re_promote_from" \
+          -sslVerify="true" -submodules="true" -depth="1" && break
+          echo "Attempt $attempt failed. Retrying..."
+          attempt=$((attempt + 1))
+          sleep 2
+        done
+
+        if [ $attempt -gt $max_attempts ]; then
+          echo "Failed to clone re-promote-from-tag branch after $max_attempts attempts."
+          exit 1
+        fi
 
         chmod 607 $(params.re-promotion-environment)
 
