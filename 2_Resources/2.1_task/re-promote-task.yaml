@@ -1,0 +1,430 @@
+apiVersion: tekton.dev/v1beta1
+kind: Task
+metadata:
+  annotations:
+    kubectl.kubernetes.io/last-applied-configuration: >
+      {"apiVersion":"tekton.dev/v1beta1","kind":"Task","metadata":{"annotations":{},"labels":{"app.kubernetes.io/instance":"tekton-cluster-resources"},"name":"application-re-promotion","namespace":"sit-uat-pipelines"},"spec":{"description":"Clones
+      an environment repo and created a release branch and PR for a module
+      re-promotion.","params":[{"description":"Re-promote from
+      tag","name":"re-promote-from-tag","type":"string"},{"description":"The
+      name of the environment that the application is being re-promoted into
+      (e.g. sit-uat, cr-train,
+      ort)","name":"re-promotion-environment","type":"string"},{"description":"The
+      bitbucket repo name for the environment that the application is being
+      re-promoted into (e.g. env-dev-int,
+      env-st-1)","name":"environment-repo-name","type":"string"},{"default":"np-bitbucket.apps.np-mgmt.obpr1.eleccninp.corporg.net","description":"Base
+      URL of the Bitbucket instance where the repos are
+      hosted","name":"bitbucket-base-url","type":"string"},{"description":"Name
+      of the application being re-promoted (e.g. fe-container-app,
+      declaration-manager)","name":"module","type":"string"},{"description":"Version
+      of the module that is being
+      re-promoted","name":"version","type":"string"},{"description":"Description
+      for the Pull
+      Request","name":"pull-request-description","type":"string"},{"description":"Title
+      for the Pull
+      Request","name":"pull-request-title","type":"string"}],"steps":[{"env":[{"name":"RELEASE_BRANCH","value":"release/$(params.module)_$(params.version)"}],"image":"np-artifactory.apps.np-mgmt.obpr1.eleccninp.corporg.net/local-docker-obp-tools/rhel-git-plus-find:latest","name":"promote-application-to-environment","script":"#!/bin/bash
+      \nchmod 607 $PWD\n# Set
+      constants\nre_promotion_environment_app_properties=$(params.re-promotion-environment)/application-environment-properties/\nre_promotion_app_params_location=$(params.re-promotion-environment)/apps/$(params.module)/overlay/kustomize/params/\nre_promote_from=$(params.re-promotion-environment)-$(params.module)-$(params.version)\n###################################################
+      ############# CLONE ENVIRONMENT REPOS #############
+      ###################################################\n# Clone the upper
+      environment repo\n# set cert config \ngit config --global http.sslCAInfo
+      /tekton-custom-certs/ca-bundle.crt\nuntil /ko-app/git-init
+      -url=\"https://$(params.bitbucket-base-url)/scm/EFE/$(params.environment-repo-name).git\"
+      -revision=\"master\"
+      -path=\"$(workspaces.output.path)/$(params.re-promotion-environment)\"
+      -sslVerify=\"true\" -submodules=\"true\" -depth=\"1\"; do sleep 2;
+      done\nuntil /ko-app/git-init
+      -url=\"https://$(params.bitbucket-base-url)/scm/EFE/$(params.environment-repo-name).git\"
+      -revision=\"$(params.re-promote-from-tag)\"
+      -path=\"$(workspaces.output.path)/$re_promote_from\" -sslVerify=\"true\"
+      -submodules=\"true\" -depth=\"1\"; do sleep 2; done\nchmod 607
+      $(params.re-promotion-environment)\nchmod 607 $re_promote_from\ncd
+      $(params.re-promotion-environment)\necho \"Creating release branch
+      $RELEASE_BRANCH\"\ngit switch -c
+      $RELEASE_BRANCH\n######################################### #############
+      ARGOCD APPSET ############# #########################################\n#
+      Add application reference to ArgoCD AppSet if not already done so\nif !
+      grep -q $(params.module) \"apps/argocd/appset/application-set.yaml\";
+      then\n\n  # Add the addition template to the existing ArgoCD AppSet and
+      output to a file\n\n  sed \"s|^\\( *\\)\\(elements:.*\\)|\\1\\2\\n\\1-
+      app: \\'$(params.module)\\'\\n\\1  url: https://kubernetes.default.svc|\"
+      apps/argocd/appset/application-set.yaml | tee output.yaml\n    \n  #
+      Replace the ArgoCD AppSet with the output file, effectively updating the
+      ArgoCD AppSet\n  \n  mv output.yaml
+      apps/argocd/appset/application-set.yaml\n\nfi\n##############################################################
+      ############# COPY APP MANIFESTS INTO APP FOLDER #############
+      ##############################################################\n# Take a
+      backup of currently deployed manifests\ncp -r apps/$(params.module)
+      $(params.module)-backup/\n# Remove currently deployed manifests\nrm -r -f
+      apps/$(params.module)\n# Add new manifests which will be deployed as part
+      of this re-promotion\ncp -r ../${re_promote_from}/apps/$(params.module)/
+      apps/$(params.module)\n######################################################################
+      ############# COPY ENV AND PIPELINE PARAMS TO APP FOLDER #############
+      ######################################################################\n#
+      Remove Properties Files for Previous Environment from App Folder\nrm
+      ../${re_promotion_app_params_location}environment.properties\n# Add
+      Properties Files for Current Environment to App Folder\ncp
+      ../${re_promotion_environment_app_properties}properties/environment.properties
+      ../${re_promotion_app_params_location}environment.properties\nrm -r -f
+      apps/$(params.module)/infra\ncp -r
+      ../${re_promotion_environment_app_properties}infra/
+      apps/$(params.module)/infra\n#################################################################
+      ############# MODULE PERSISTENT ENVIRONMENT OVERLAY #############
+      #################################################################\n#
+      Restore the Persistent Enviornment Overlay from the backup\nrm -rf
+      apps/$(params.module)/overlay/env/persistent\n# Check whether the
+      Application has a Persistent Environment Overlay defined (by checking the
+      backup)\nif [ -d \"$(params.module)-backup/overlay/env/persistent\" ];
+      then\n\n  # If an Overlay is defined, copy from backup/ into
+      application/\n\n  cp -r $(params.module)-backup/overlay/env/persistent
+      apps/$(params.module)/overlay/env/\n\nelse\n\n  # If an Overlay is not
+      defined, copy a template from persistent-environment-overlay/ into
+      application/\n\n  cp -r
+      application-environment-properties/persistent-environment-overlay/
+      apps/$(params.module)/overlay/env/persistent\n\nfi\n# Remove application
+      backup from filesystem\nrm -rf
+      $(params.module)-backup\n#####################################################
+      ############# GIT COMMIT TO ENV REPO ################
+      #####################################################\n# Commit changes to
+      environment repo\ngit add apps/argocd/appset apps/$(params.module)\n#
+      Update tree and configure git\nuntil git pull origin master; do sleep 2;
+      done\ngit config --global user.email
+      \"sa-app-promotion-pipeline@np-mgmt.eleccninp.corporg.net\"\ngit config
+      --global user.name \"sa-app-promotion-pipeline\"\n# Remove the
+      module_version tag if it already exists\ngit tag \u003e tags.txt\nif grep
+      -q \"$(params.module)_$(params.version)\" \"tags.txt\"; then\n\n  for
+      attempts in {1..6};\n  do\n\n    # Remove tag from remote and local\n\n   
+      git push --delete origin \"$(params.module)_$(params.version)\"
+      \u0026\u0026 git tag -d \"$(params.module)_$(params.version)\"
+      \u0026\u0026 break\n\n    if (( $attempts == 6 )); then\n\n      echo
+      \"EXITING: Failed to remove module tag from the
+      $(params.environment-repo-name) repo within the time window\"\n\n     
+      exit 1\n\n    fi\n\n    sleep 10\n\n  done\n\nfi\n# Commit changes and
+      push to remote\ngit commit -m \"Tekton Commit - Re-promoting version
+      $(params.version) of $(params.module) to the
+      $(params.re-promotion-environment) environment\"\ngit tag
+      $(params.module)_$(params.version)\nfor attempts in {1..10}; do\n\n  echo
+      \"Attempt $attempts to push\"\n  git pull origin master\n  git push -f
+      origin $RELEASE_BRANCH --tags \u0026\u0026 exit 0 ||
+      :\n\ndone\n","workingDir":"$(workspaces.output.path)"},{"env":[{"name":"BITBUCKET_PASSWORD","valueFrom":{"secretKeyRef":{"key":"password","name":"git-access-np"}}},{"name":"BITBUCKET_USERNAME","valueFrom":{"secretKeyRef":{"key":"username","name":"git-access-np"}}},{"name":"RELEASE_BRANCH","value":"release/$(params.module)_$(params.version)"}],"image":"np-artifactory.apps.np-mgmt.obpr1.eleccninp.corporg.net/local-docker-obp-tools/openshift-pipelines-git-cli:v1","name":"trigger-re-promotion-pr","script":"#!/usr/bin/env
+      sh\nuntil curl --cacert /tekton-custom-certs/ca-bundle.crt --request POST
+      -u ${BITBUCKET_USERNAME}:${BITBUCKET_PASSWORD} --url
+      'https://$(params.bitbucket-base-url)/rest/api/1.0/projects/EFE/repos/$(params.environment-repo-name)/pull-requests'
+      --header 'Accept: application/json' --header 'Content-Type:
+      application/json' --data '{  \"title\": \"$(params.pull-request-title)\",
+      \"description\": \"$(params.pull-request-description)\",\n  \"fromRef\":
+      {\n  \"title\": \"$(params.pull-request-title)\", \n  \"id\":
+      \"refs/heads/release/$(params.module)_$(params.version)\",\n  \"type\":
+      \"BRANCH\",\n  \"repository\": {\n    \"slug\":
+      \"$(params.environment-repo-name)\",\n    \"title\":
+      \"$(params.pull-request-title)\",\n    \"project\": {\n        \"key\":
+      \"EFE\"\n      }\n    }\n  },\n  \"description\":
+      \"$(params.pull-request-description)\", \n  \"toRef\": { \"id\":
+      \"refs/heads/master\", \n  \"displayId\": \"master\" ,\n  \"slug\":
+      \"$(params.environment-repo-name)\" ,\n  \"title\":
+      \"$(params.pull-request-title)\" }}'; do sleep 2;
+      done","workingDir":"$(workspaces.output.path)"}],"workspaces":[{"name":"output"}]}}
+  resourceVersion: '1411464439'
+  name: application-re-promotion
+  uid: 22fd7883-9ac5-423c-9a72-436ce4b9cc64
+  creationTimestamp: '2024-07-15T13:57:26Z'
+  generation: 5
+  managedFields:
+    - apiVersion: tekton.dev/v1beta1
+      fieldsType: FieldsV1
+      fieldsV1:
+        'f:metadata':
+          'f:annotations':
+            .: {}
+            'f:kubectl.kubernetes.io/last-applied-configuration': {}
+          'f:labels':
+            .: {}
+            'f:app.kubernetes.io/instance': {}
+        'f:spec':
+          .: {}
+          'f:description': {}
+          'f:params': {}
+          'f:steps': {}
+          'f:workspaces': {}
+      manager: argocd-controller
+      operation: Update
+      time: '2025-03-05T09:49:57Z'
+  namespace: sit-uat-pipelines
+  labels:
+    app.kubernetes.io/instance: tekton-cluster-resources
+spec:
+  description: >-
+    Clones an environment repo and created a release branch and PR for a module
+    re-promotion.
+  params:
+    - description: Re-promote from tag
+      name: re-promote-from-tag
+      type: string
+    - description: >-
+        The name of the environment that the application is being re-promoted
+        into (e.g. sit-uat, cr-train, ort)
+      name: re-promotion-environment
+      type: string
+    - description: >-
+        The bitbucket repo name for the environment that the application is
+        being re-promoted into (e.g. env-dev-int, env-st-1)
+      name: environment-repo-name
+      type: string
+    - default: np-bitbucket.apps.np-mgmt.obpr1.eleccninp.corporg.net
+      description: Base URL of the Bitbucket instance where the repos are hosted
+      name: bitbucket-base-url
+      type: string
+    - description: >-
+        Name of the application being re-promoted (e.g. fe-container-app,
+        declaration-manager)
+      name: module
+      type: string
+    - description: Version of the module that is being re-promoted
+      name: version
+      type: string
+    - description: Description for the Pull Request
+      name: pull-request-description
+      type: string
+    - description: Title for the Pull Request
+      name: pull-request-title
+      type: string
+  steps:
+    - env:
+        - name: RELEASE_BRANCH
+          value: release/$(params.module)_$(params.version)
+      image: >-
+        np-artifactory.apps.np-mgmt.obpr1.eleccninp.corporg.net/local-docker-obp-tools/rhel-git-plus-find:latest
+      name: promote-application-to-environment
+      resources: {}
+      script: >
+        #!/bin/bash 
+
+        chmod 607 $PWD
+
+        # Set constants
+
+        re_promotion_environment_app_properties=$(params.re-promotion-environment)/application-environment-properties/
+
+        re_promotion_app_params_location=$(params.re-promotion-environment)/apps/$(params.module)/overlay/kustomize/params/
+
+        re_promote_from=$(params.re-promotion-environment)-$(params.module)-$(params.version)
+
+        ################################################### ############# CLONE
+        ENVIRONMENT REPOS #############
+        ###################################################
+
+        # Clone the upper environment repo
+
+        # set cert config 
+
+        git config --global http.sslCAInfo /tekton-custom-certs/ca-bundle.crt
+
+        until /ko-app/git-init
+        -url="https://$(params.bitbucket-base-url)/scm/EFE/$(params.environment-repo-name).git"
+        -revision="master"
+        -path="$(workspaces.output.path)/$(params.re-promotion-environment)"
+        -sslVerify="true" -submodules="true" -depth="1"; do sleep 2; done
+
+        until /ko-app/git-init
+        -url="https://$(params.bitbucket-base-url)/scm/EFE/$(params.environment-repo-name).git"
+        -revision="$(params.re-promote-from-tag)"
+        -path="$(workspaces.output.path)/$re_promote_from" -sslVerify="true"
+        -submodules="true" -depth="1"; do sleep 2; done
+
+        chmod 607 $(params.re-promotion-environment)
+
+        chmod 607 $re_promote_from
+
+        cd $(params.re-promotion-environment)
+
+        echo "Creating release branch $RELEASE_BRANCH"
+
+        git switch -c $RELEASE_BRANCH
+
+        ######################################### ############# ARGOCD APPSET
+        ############# #########################################
+
+        # Add application reference to ArgoCD AppSet if not already done so
+
+        if ! grep -q $(params.module) "apps/argocd/appset/application-set.yaml";
+        then
+
+          # Add the addition template to the existing ArgoCD AppSet and output to a file
+
+          sed "s|^\( *\)\(elements:.*\)|\1\2\n\1- app: \'$(params.module)\'\n\1  url: https://kubernetes.default.svc|" apps/argocd/appset/application-set.yaml | tee output.yaml
+            
+          # Replace the ArgoCD AppSet with the output file, effectively updating the ArgoCD AppSet
+          
+          mv output.yaml apps/argocd/appset/application-set.yaml
+
+        fi
+
+        ##############################################################
+        ############# COPY APP MANIFESTS INTO APP FOLDER #############
+        ##############################################################
+
+        # Take a backup of currently deployed manifests
+
+        cp -r apps/$(params.module) $(params.module)-backup/
+
+        # Remove currently deployed manifests
+
+        rm -r -f apps/$(params.module)
+
+        # Add new manifests which will be deployed as part of this re-promotion
+
+        cp -r ../${re_promote_from}/apps/$(params.module)/ apps/$(params.module)
+
+        ######################################################################
+        ############# COPY ENV AND PIPELINE PARAMS TO APP FOLDER #############
+        ######################################################################
+
+        # Remove Properties Files for Previous Environment from App Folder
+
+        rm ../${re_promotion_app_params_location}environment.properties
+
+        # Add Properties Files for Current Environment to App Folder
+
+        cp
+        ../${re_promotion_environment_app_properties}properties/environment.properties
+        ../${re_promotion_app_params_location}environment.properties
+
+        rm -r -f apps/$(params.module)/infra
+
+        cp -r ../${re_promotion_environment_app_properties}infra/
+        apps/$(params.module)/infra
+
+        #################################################################
+        ############# MODULE PERSISTENT ENVIRONMENT OVERLAY #############
+        #################################################################
+
+        # Restore the Persistent Enviornment Overlay from the backup
+
+        rm -rf apps/$(params.module)/overlay/env/persistent
+
+        # Check whether the Application has a Persistent Environment Overlay
+        defined (by checking the backup)
+
+        if [ -d "$(params.module)-backup/overlay/env/persistent" ]; then
+
+          # If an Overlay is defined, copy from backup/ into application/
+
+          cp -r $(params.module)-backup/overlay/env/persistent apps/$(params.module)/overlay/env/
+
+        else
+
+          # If an Overlay is not defined, copy a template from persistent-environment-overlay/ into application/
+
+          cp -r application-environment-properties/persistent-environment-overlay/ apps/$(params.module)/overlay/env/persistent
+
+        fi
+
+        # Remove application backup from filesystem
+
+        rm -rf $(params.module)-backup
+
+        ##################################################### ############# GIT
+        COMMIT TO ENV REPO ################
+        #####################################################
+
+        # Commit changes to environment repo
+
+        git add apps/argocd/appset apps/$(params.module)
+
+        # Update tree and configure git
+
+        until git pull origin master; do sleep 2; done
+
+        git config --global user.email
+        "sa-app-promotion-pipeline@np-mgmt.eleccninp.corporg.net"
+
+        git config --global user.name "sa-app-promotion-pipeline"
+
+        # Remove the module_version tag if it already exists
+
+        git tag > tags.txt
+
+        if grep -q "$(params.module)_$(params.version)" "tags.txt"; then
+
+          for attempts in {1..6};
+          do
+
+            # Remove tag from remote and local
+
+            git push --delete origin "$(params.module)_$(params.version)" && git tag -d "$(params.module)_$(params.version)" && break
+
+            if (( $attempts == 6 )); then
+
+              echo "EXITING: Failed to remove module tag from the $(params.environment-repo-name) repo within the time window"
+
+              exit 1
+
+            fi
+
+            sleep 10
+
+          done
+
+        fi
+
+        # Commit changes and push to remote
+
+        git commit -m "Tekton Commit - Re-promoting version $(params.version) of
+        $(params.module) to the $(params.re-promotion-environment) environment"
+
+        git tag $(params.module)_$(params.version)
+
+        for attempts in {1..10}; do
+
+          echo "Attempt $attempts to push"
+          git pull origin master
+          git push -f origin $RELEASE_BRANCH --tags && exit 0 || :
+
+        done
+      workingDir: $(workspaces.output.path)
+    - env:
+        - name: BITBUCKET_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              key: password
+              name: git-access-np
+        - name: BITBUCKET_USERNAME
+          valueFrom:
+            secretKeyRef:
+              key: username
+              name: git-access-np
+        - name: RELEASE_BRANCH
+          value: release/$(params.module)_$(params.version)
+      image: >-
+        np-artifactory.apps.np-mgmt.obpr1.eleccninp.corporg.net/local-docker-obp-tools/openshift-pipelines-git-cli:v1
+      name: trigger-re-promotion-pr
+      resources: {}
+      script: >-
+        #!/usr/bin/env sh
+
+        until curl --cacert /tekton-custom-certs/ca-bundle.crt --request POST -u
+        ${BITBUCKET_USERNAME}:${BITBUCKET_PASSWORD} --url
+        'https://$(params.bitbucket-base-url)/rest/api/1.0/projects/EFE/repos/$(params.environment-repo-name)/pull-requests'
+        --header 'Accept: application/json' --header 'Content-Type:
+        application/json' --data '{  "title": "$(params.pull-request-title)",
+        "description": "$(params.pull-request-description)",
+          "fromRef": {
+          "title": "$(params.pull-request-title)", 
+          "id": "refs/heads/release/$(params.module)_$(params.version)",
+          "type": "BRANCH",
+          "repository": {
+            "slug": "$(params.environment-repo-name)",
+            "title": "$(params.pull-request-title)",
+            "project": {
+                "key": "EFE"
+              }
+            }
+          },
+          "description": "$(params.pull-request-description)", 
+          "toRef": { "id": "refs/heads/master", 
+          "displayId": "master" ,
+          "slug": "$(params.environment-repo-name)" ,
+          "title": "$(params.pull-request-title)" }}'; do sleep 2; done
+      workingDir: $(workspaces.output.path)
+  workspaces:
+    - name: output
