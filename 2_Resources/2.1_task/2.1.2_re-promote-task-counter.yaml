@@ -79,6 +79,14 @@ spec:
       script: >
         #!/bin/bash 
 
+        print_section() {
+          echo ""
+          echo "=================================================================="
+          echo "🔷 $1"
+          echo "=================================================================="
+          echo ""
+        }
+
         chmod 607 $PWD
 
         # Set constants
@@ -183,18 +191,26 @@ spec:
         ############# COPY ENV AND PIPELINE PARAMS TO APP FOLDER #############
         ######################################################################
 
-        # Remove Properties Files for Previous Environment from App Folder
-
+        echo "⚠️ Removing properties file from: ../${re_promotion_app_params_location}environment.properties"
         rm ../${re_promotion_app_params_location}environment.properties
 
         # Add Properties Files for Current Environment to App Folder
+        
 
+        echo "📥 Copying environment properties from:"
+        echo "Source: ../${re_promotion_environment_app_properties}properties/environment.properties"
+        echo "Target: ../${re_promotion_app_params_location}environment.properties"
         cp
         ../${re_promotion_environment_app_properties}properties/environment.properties
         ../${re_promotion_app_params_location}environment.properties
 
+        echo "⚠️ Removing infra directory from: apps/$(params.module)/infra"
         rm -r -f apps/$(params.module)/infra
 
+
+        echo "📥 Copying infra directory from:"
+        echo "Source: ../${re_promotion_environment_app_properties}infra/"
+        echo "Target: apps/$(params.module)/infra"
         cp -r ../${re_promotion_environment_app_properties}infra/
         apps/$(params.module)/infra
 
